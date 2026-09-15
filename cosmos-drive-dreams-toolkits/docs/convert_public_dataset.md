@@ -67,3 +67,49 @@ here `-d` is the dataset name, you can find its configuration in `config/dataset
 ```bash
 python render_from_rds_hq.py -d waymo -i waymo_demo -o waymo_demo_render_pinhole -c pinhole
 ```
+
+### Batch conversion with five camera views
+
+The repository-level batch driver converts every TFRecord into an independent
+clip directory. It is restartable and produces RDS-HQ data, five-view RGB,
+HD-map and LiDAR videos, plus an RGB/LiDAR/HD-map four-grid preview for every
+camera.
+
+Run it from the repository root. The Waymo SDK generally needs a Python 3.10
+environment, while rendering can use the main project environment:
+
+```bash
+python scripts/convert_waymo_full_batch.py \
+    --stage all \
+    --input-root <WAYMO_TFRECORDS_FOLDER> \
+    --output-root <OUTPUT_FOLDER> \
+    --waymo-python /path/to/waymo/env/bin/python \
+    --render-python /path/to/cosmos-drive-dreams/env/bin/python \
+    --rds-workers 12 \
+    --render-workers 4 \
+    --preview-workers 4 \
+    --gpu-count 4
+```
+
+`WAYMO_PYTHON` and `RENDER_PYTHON` environment variables can be used instead
+of the corresponding command-line options. Re-running the command validates
+and skips completed stages. A directory-level lock prevents multiple batch
+drivers from writing the same clips concurrently.
+
+Each output package uses the following layout:
+
+```text
+<OUTPUT_FOLDER>/<CLIP_ID>/
+|-- rds/
+|-- multiview/
+|   |-- videos/pinhole_<CAMERA>/
+|   |-- lidar/pinhole_<CAMERA>/
+|   `-- hdmap/pinhole_<CAMERA>/
+|-- preview/pinhole_<CAMERA>_four_grid.mp4
+|-- logs/
+`-- .state/
+```
+
+You can run individual stages with `--stage rds`, `--stage multiview`, or
+`--stage preview`. The legacy modality-first output layout can be reorganized
+once with `--stage migrate`.

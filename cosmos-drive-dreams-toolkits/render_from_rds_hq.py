@@ -442,8 +442,6 @@ def render_sample_lidar(
     camera_name_to_camera_poses, render_frame_ids, all_object_info, camera_name_to_camera_model = \
         prepare_input(input_root, clip_id, settings, camera_type, post_training, resize_resolution, novel_pose_folder)
 
-    frame_num = len(render_frame_ids)
-
     for camera_name, camera_model in camera_name_to_camera_model.items():
         pose_all_frames = camera_name_to_camera_poses[camera_name]
         # load lidar data
@@ -454,7 +452,10 @@ def render_sample_lidar(
         lidar_depth_list = []
         interp_rate = INPUT_POSE_FPS // INPUT_LIDAR_FPS
         for frame_idx in render_frame_ids:
-            accumulate_idx = [min(max(0, frame_idx + i * interp_rate), frame_num-1) for i in range(-accumulate_lidar_frames, accumulate_lidar_frames+1)]
+            # frame_idx is expressed on the 30 Hz pose timeline even when rendering
+            # post-training videos at 10 Hz. Do not clamp it by the number of
+            # rendered frames (e.g. 190), because valid indices can reach 567.
+            accumulate_idx = [max(0, frame_idx + i * interp_rate) for i in range(-accumulate_lidar_frames, accumulate_lidar_frames+1)]
             low_fps_frame_indices, _ = get_nearest_lidar_indices(accumulate_idx, step=interp_rate)
 
             lidar_frame_ids = [

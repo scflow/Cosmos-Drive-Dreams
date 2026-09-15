@@ -8,12 +8,27 @@ from pathlib import Path
 from typing import List, Dict, Any, Union
 from termcolor import cprint
 from tqdm import tqdm
-from scipy.spatial.transform import Rotation as R
+from scipy.spatial.transform import Rotation as R, Slerp
 from waymo_open_dataset import dataset_pb2, label_pb2
 from waymo_open_dataset.utils import frame_utils
 from google.protobuf import json_format
 from utils.wds_utils import write_to_tar, encode_dict_to_npz_bytes
-from utils.bbox_utils import interpolate_pose
+
+
+def interpolate_pose(prev_pose, next_pose, t):
+    """Interpolate a rigid pose without importing the rendering dependency tree."""
+    input_is_list = isinstance(prev_pose, list)
+    prev_pose = np.asarray(prev_pose)
+    next_pose = np.asarray(next_pose)
+
+    result = np.eye(4)
+    result[:3, 3] = (1 - t) * prev_pose[:3, 3] + t * next_pose[:3, 3]
+    rotations = R.from_quat([
+        R.from_matrix(prev_pose[:3, :3]).as_quat(),
+        R.from_matrix(next_pose[:3, :3]).as_quat(),
+    ])
+    result[:3, :3] = Slerp([0, 1], rotations)(t).as_matrix()
+    return result.tolist() if input_is_list else result
 
 WaymoProto2SemanticLabel = {
     label_pb2.Label.Type.TYPE_UNKNOWN: "Unknown",
@@ -60,7 +75,7 @@ def convert_waymo_intrinsics(output_root: Path, clip_id: str, dataset: tf.data.T
 
     for frame_idx, data in enumerate(dataset):
         frame = dataset_pb2.Frame()
-        frame.ParseFromString(bytearray(data.numpy()))
+        frame.ParseFromString(data.numpy())
 
         for camera_calib in frame.context.camera_calibrations:
             camera_name = get_camera_name(camera_calib.name).lower()
@@ -111,7 +126,7 @@ def convert_waymo_hdmap(output_root: Path, clip_id: str, dataset: tf.data.TFReco
 
     for frame_idx, data in enumerate(dataset):
         frame = dataset_pb2.Frame()
-        frame.ParseFromString(bytearray(data.numpy()))
+        frame.ParseFromString(data.numpy())
 
         map_features_list = json_format.MessageToDict(frame)['mapFeatures']
 
@@ -189,7 +204,7 @@ def convert_waymo_pose(output_root: Path, clip_id: str, dataset: tf.data.TFRecor
     # get camera_to_vehicle from the first frame
     for frame_idx, data in enumerate(dataset):
         frame = dataset_pb2.Frame()
-        frame.ParseFromString(bytearray(data.numpy()))
+        frame.ParseFromString(data.numpy())
 
         for camera_calib in frame.context.camera_calibrations:
             camera_name = get_camera_name(camera_calib.name).lower()
@@ -201,7 +216,7 @@ def convert_waymo_pose(output_root: Path, clip_id: str, dataset: tf.data.TFRecor
 
     for frame_idx, data in enumerate(dataset):
         frame = dataset_pb2.Frame()
-        frame.ParseFromString(bytearray(data.numpy()))
+        frame.ParseFromString(data.numpy())
 
         for image_data in frame.images:
             camera_name = get_camera_name(image_data.name).lower()
@@ -266,7 +281,7 @@ def convert_waymo_timestamp(output_root: Path, clip_id: str, dataset: tf.data.TF
     
     for frame_idx, data in enumerate(dataset):
         frame = dataset_pb2.Frame()
-        frame.ParseFromString(bytearray(data.numpy()))
+        frame.ParseFromString(data.numpy())
         timestamp_micros = frame.timestamp_micros
         sample[f"{frame_idx * IndexScaleRatio:06d}.timestamp_micros.txt"] = str(timestamp_micros)
         
@@ -302,7 +317,7 @@ def convert_waymo_bbox(output_root: Path, clip_id: str, dataset: tf.data.TFRecor
 
     for frame_idx, data in enumerate(dataset):
         frame = dataset_pb2.Frame()
-        frame.ParseFromString(bytearray(data.numpy()))
+        frame.ParseFromString(data.numpy())
 
         vehicle_to_world = np.array(frame.pose.transform).reshape((4, 4))
         sample[f"{frame_idx * IndexScaleRatio:06d}.all_object_info.json"] = {}
@@ -357,7 +372,7 @@ def convert_waymo_lidar(output_root: Path, clip_id: str, dataset: tf.data.TFReco
 
     for frame_idx, data in enumerate(dataset):
         frame = dataset_pb2.Frame()
-        frame.ParseFromString(bytearray(data.numpy()))
+        frame.ParseFromString(data.numpy())
 
         vehicle_to_world = np.array(frame.pose.transform).reshape((4, 4))
         
@@ -404,7 +419,7 @@ def convert_waymo_image(output_root: Path, clip_id: str, dataset: tf.data.TFReco
 
     for frame_idx, data in enumerate(dataset):
         frame = dataset_pb2.Frame()
-        frame.ParseFromString(bytearray(data.numpy()))
+        frame.ParseFromString(data.numpy())
 
         for image_data in frame.images:
             camera_name = get_camera_name(image_data.name).lower()
@@ -435,7 +450,7 @@ def convert_waymo_tfrecord_to_wds(
     single_camera: bool = False
 ):
     waymo_tfrecord_path = Path(waymo_tfrecord_filename)
-    clip_id = waymo_tfrecord_path.stem.lstrip('segment-').rstrip('_with_camera_labels')
+    clip_id = waymo_tfrecord_path.stem.removeprefix('segment-').removesuffix('_with_camera_labels')
     output_wds_path = Path(output_wds_path)
 
     if not waymo_tfrecord_path.exists():
