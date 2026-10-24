@@ -180,6 +180,87 @@ We provide a conversion and rendering script for the Waymo Open Dataset as an ex
 
 [Convert Waymo Open Dataset](./docs/convert_public_dataset.md)
 
+### nuPlan RDS conversion and image export
+
+`convert_nuplan_and_render_images.py` runs conversion before rendering and saves
+World Scenario plus an untitled aligned RGB/HD-map/World-Scenario/fusion 2x2
+grid. Output names contain location, Beijing timestamp (`BJT`), and camera name.
+
+```bash
+python convert_nuplan_and_render_images.py \
+  --db_path /path/to/nuplan.db \
+  --sensor_root /path/to/nuplan-v1.1/sensor_blobs \
+  --map_root /path/to/maps/maps \
+  --output_root /path/to/output \
+  --all_cameras \
+  --start_index 0 \
+  --frame_count 200
+```
+
+The output is separated into `rds/`, `rendered/`, and `images/`. Images are
+organized as `images/<location>/<Beijing-date>/<camera>/<image-type>/*.jpg`.
+Only `world_scenario` and `four_grid` are stored as standalone JPEG products;
+RGB, RDS HD map, and RGB/RDS fusion remain visible inside the four-grid without
+being duplicated as separate files. Temporary HD-map and World Scenario render
+videos are deleted after those JPEGs are extracted; the source videos and all
+other RDS data under `rds/` are retained.
+
+For a complete nuPlan release, use the restartable multi-process batch driver:
+
+```bash
+python batch_convert_nuplan_and_render_images.py \
+  --db_root /path/to/nuplan-v1.1/splits \
+  --sensor_root /path/to/nuplan-v1.1/sensor_blobs \
+  --map_root /path/to/maps/maps \
+  --output_root /path/to/nuplan_rds_export \
+  --all_cameras \
+  --clip_frames 200 \
+  --workers 32 \
+  --threads_per_worker 2 \
+  --max_in_flight 64
+```
+
+The batch driver recursively discovers databases, removes duplicate log stems,
+splits each log into non-overlapping clips, and records per-clip state under
+`status/` and logs under `logs/`. Successful clips are skipped on the next run.
+Use `--dry_run` to inspect the plan before starting. Use `--convert_only` when
+only RDS data is required. Full batch visualization always exports every source
+camera frame; it does not expose sampling or maximum-frame options.
+
+`--max_in_flight` bounds queued plus running clips so a full-release plan does
+not create hundreds of thousands of `Future` objects at once. Zero (the
+default) selects `2 * workers`. Increasing `--workers` beyond the storage
+system's useful I/O concurrency may reduce throughput. Estimate output size on
+a representative clip before a full 8-camera image export: each timestamp
+produces 16 JPEGs (two image products for each of eight cameras), in addition
+to the RDS files.
+
+While running, the terminal displays a clip progress bar with ETA and
+success/failure counts. Global events are appended to `batch.log`, live numeric
+progress is stored in `batch_progress.json`, and each clip has its own detailed
+`logs/<task-id>.log` and `status/<task-id>.json` files.
+
+The nuPlan World Scenario conversion includes painted lane boundaries, road
+boundaries, crosswalk polygons, stop/yield lines, physical traffic-light heads
+with per-frame state, and tracked-object cuboids. Lane centerlines, inferred
+signal poles, and map layers without a reliable nuPlan counterpart are not
+fabricated. Filled geometry is clipped at the camera near plane, calibrated
+projection domain, and image bounds before rendering.
+
+To add the new crosswalk, wait-line, and traffic-light layers to existing RDS
+clips without rewriting camera videos, poses, intrinsics, or object labels:
+
+```bash
+python update_nuplan_rds_world_scenario.py \
+  --rds_root /path/to/existing/export/rds \
+  --workers 16
+```
+
+The updater is restartable. It records `nuplan-world-scenario-v2` in each
+updated manifest and skips those clips on the next run. Use `--force` to
+regenerate the layers. World Scenario and four-grid images must be rendered
+again after updating because existing JPEGs still contain the old geometry.
+
 **Waymo Rendering Results (use ftheta intrinsics in RDS-HQ)**
 ![Waymo Rendering Results](../assets/waymo_render_ftheta.png)
 

@@ -15,7 +15,8 @@ from termcolor import cprint
 from utils.wds_utils import get_sample
 import os
 from utils.pcd_utils import interpolate_polyline_to_points, triangulate_polygon_3d, filter_by_height_relative_to_ego
-from utils.graphics_utils import LineSegment2D, BoundingBox2D, Polygon2D, TriangleList2D
+from utils.graphics_utils import ALL_FACE_INDICES, LineSegment2D, TriangleList2D
+from utils.projection_clipping import project_and_clip_segments, project_and_clip_triangle
 
 MINIMAP_TO_TYPE = json.load(open(Path(__file__).parent.parent / 'config' /'hdmap_type_config.json'))
 
@@ -338,7 +339,8 @@ def create_minimap_geometry_objects_from_data(
         minimap_type = get_type_from_name(minimap_name)
         # We create LineSegment2D geometry object for each polyline
         if minimap_type == 'polyline':
-            line_segment_list = []
+            line_segments = []
+            world_to_camera = np.linalg.inv(camera_pose)
             for polyline in minimap_data:
                 # Filter out minimap that is under the ego vehicle
                 if camera_pose_init is not None and filter_by_height_relative_to_ego(
@@ -347,82 +349,73 @@ def create_minimap_geometry_objects_from_data(
                     continue
                 # Subdivide the polyline so that distortion is observed in camera view
                 polyline_subdivided = interpolate_polyline_to_points(polyline, segment_interval=0.2)
-                line_segment = np.stack([polyline_subdivided[0:-1], polyline_subdivided[1:]], axis=1) # [N, 2, 3]
-                line_segment_list.append(line_segment)
-            if len(line_segment_list) == 0:
+                line_segments.append(
+                    np.stack([polyline_subdivided[:-1], polyline_subdivided[1:]], axis=1)
+                )
+            if not line_segments:
                 continue
-
-            all_line_segments = np.concatenate(line_segment_list, axis=0) # [N', 2, 3]
-            xy_and_depth = camera_model.get_xy_and_depth(all_line_segments.reshape(-1, 3), camera_pose).reshape(-1, 2, 3) # [N', 3]
-
-            # filter the line segments with both vertices have depth >= 0
-            valid_line_segment_vertices = xy_and_depth[:, :, 2] >= 0
-            valid_line_segment_indices = np.all(valid_line_segment_vertices, axis=1)
-            valid_xy_and_depth = xy_and_depth[valid_line_segment_indices]
-            if len(valid_xy_and_depth) == 0:
+            line_segments = np.concatenate(line_segments, axis=0)
+            points_in_camera = camera_model.transform_points(
+                line_segments.reshape(-1, 3), world_to_camera
+            ).reshape(-1, 2, 3)
+            clipped_segments = project_and_clip_segments(camera_model, points_in_camera)
+            if len(clipped_segments) == 0:
                 continue
 
             color_float = np.array(minimap_to_rgb[minimap_name]) / 255.0
             all_geometry_objects.append(
                 LineSegment2D(
-                    valid_xy_and_depth,
+                    clipped_segments,
                     base_color=color_float,
                     line_width=5 if minimap_name == 'poles' else 12,
                 )
             )
 
         elif minimap_type == 'polygon' or minimap_type == 'cuboid3d':
-            # merge all vertices from polygons and record indices
-            polygon_vertices = []
-            polygon_vertex_counts = []
+            color_float = np.array(minimap_to_rgb[minimap_name]) / 255.0
+            clipped_triangles = []
+            world_to_camera = np.linalg.inv(camera_pose)
             for polygon in minimap_data:
                 # Filter out minimap that is under the ego vehicle
                 if camera_pose_init is not None and filter_by_height_relative_to_ego(
                     polygon, camera_model, camera_pose, camera_pose_init
                 ):
                     continue
-                if minimap_name == 'crosswalks':
+                if minimap_type == 'polygon':
                     # Subdivide the polygon so that distortion is observed in camera view
-                    polygon_subdivided = interpolate_polyline_to_points(polygon, segment_interval=0.8)
-                    # Use triangulation for crosswalks to handle concave polygons in camera view
-                    triangles_3d = triangulate_polygon_3d(polygon_subdivided)
-                    polygon_subdivided = triangles_3d.reshape(-1, 3)
-                    if len(polygon_subdivided) == 0:
-                        continue
-                else:
-                    polygon_subdivided = polygon
-                polygon_vertices.append(polygon_subdivided)
-                polygon_vertex_counts.append(len(polygon_subdivided))
-            if len(polygon_vertices) == 0:
-                continue
-            # get xy and depth for all vertices at once
-            all_vertices = np.concatenate(polygon_vertices, axis=0)
-            all_xy_and_depth = camera_model.get_xy_and_depth(all_vertices, camera_pose)
-
-            # recover individual polygons using recorded counts, and keep access to original 3D subdivided vertices
-            start_idx = 0
-            for vertex_count in polygon_vertex_counts:
-                polygon_xy_and_depth = all_xy_and_depth[start_idx:start_idx+vertex_count]
-                start_idx += vertex_count
-                color_float = np.array(minimap_to_rgb[minimap_name]) / 255.0
-
-                if minimap_name == 'crosswalks':
-                    triangles_proj = polygon_xy_and_depth.reshape(-1, 3, 3)
-                    # Filter out triangles that are completely behind camera
-                    invalid_triangles_indices = np.all(triangles_proj[:, :, 2] < 0, axis=1)
-                    valid_triangles_indices = ~invalid_triangles_indices
-                    if valid_triangles_indices.sum() > 0:
-                        all_geometry_objects.append(
-                            TriangleList2D(triangles_proj[valid_triangles_indices], base_color=color_float)
-                        )
-                else:
-                    # filter out the polygons that are out of the image
-                    if np.all(polygon_xy_and_depth[:, 2] < 0):
-                        continue
-                    # Use regular polygon rendering for other polygon types
-                    all_geometry_objects.append(
-                        Polygon2D(polygon_xy_and_depth, base_color=color_float)
+                    polygon_vertices = (
+                        interpolate_polyline_to_points(polygon, segment_interval=0.8)
+                        if minimap_name == 'crosswalks'
+                        else np.asarray(polygon)
                     )
+                    triangles_world = triangulate_polygon_3d(polygon_vertices)
+                else:
+                    # simplify_minimap stores cuboids as a 16-point edge walk.
+                    polygon = np.asarray(polygon)
+                    if len(polygon) >= 9:
+                        cuboid_vertices = polygon[[0, 1, 2, 3, 5, 6, 7, 8]]
+                    elif len(polygon) == 8:
+                        cuboid_vertices = polygon
+                    else:
+                        continue
+                    triangles_world = cuboid_vertices[np.asarray(ALL_FACE_INDICES)]
+
+                for triangle_world in triangles_world:
+                    triangle_camera = camera_model.transform_points(
+                        triangle_world, world_to_camera
+                    )
+                    triangles_projected, _ = project_and_clip_triangle(
+                        camera_model, triangle_camera
+                    )
+                    if len(triangles_projected):
+                        clipped_triangles.extend(triangles_projected)
+            if clipped_triangles:
+                all_geometry_objects.append(
+                    TriangleList2D(
+                        np.asarray(clipped_triangles),
+                        base_color=color_float,
+                    )
+                )
         else:
             raise ValueError(f"Invalid minimap type: {minimap_type}")
 
@@ -501,40 +494,53 @@ def create_traffic_light_status_geometry_objects_from_data(
     """
     if traffic_light_position_list is None:
         return []
-    # in RDS-HQ format, if there is only one element, it is actually a label for no traffic light.
-    if len(traffic_light_position_list) == 1:
+    traffic_light_position_list = [
+        label
+        for label in traffic_light_position_list
+        if not label.get('labelData', {}).get('emptyLabel', False)
+        and 'shape3d' in label.get('labelData', {})
+    ]
+    if not traffic_light_position_list:
         return []
 
-    polygon_vertices = []
-    polygon_colors = []
+    clipped_triangles = []
+    clipped_colors = []
+    world_to_camera = np.linalg.inv(camera_pose)
     for traffic_light_index, traffic_light_data in enumerate(traffic_light_position_list):
-        if traffic_light_per_frame_status_dict is None:
+        this_frame_status = None
+        if traffic_light_per_frame_status_dict is not None:
+            this_frame_status = traffic_light_per_frame_status_dict.get(str(traffic_light_index))
+        if this_frame_status is None:
             # Use unknown color for traffic light without status
             signal_render_color = np.array(tl_status_to_rgb['unknown']) / 255.0
         else:
-            this_frame_status = traffic_light_per_frame_status_dict[str(traffic_light_index)]
-            assert {"name": "feature_id", "text": this_frame_status['feature_id']} in \
-                traffic_light_data['labelData']['shape3d']['attributes']
-            signal_state = this_frame_status['state'][frame_id]
+            state_sequence = this_frame_status.get('state', [])
+            signal_state = (
+                state_sequence[frame_id]
+                if frame_id < len(state_sequence)
+                else 'unknown'
+            )
+            if signal_state not in tl_status_to_rgb:
+                signal_state = 'unknown'
             signal_render_color = np.array(tl_status_to_rgb[signal_state]) / 255.0
-        polygon_vertices.append(
-            cuboid3d_to_polyline(
-                traffic_light_data['labelData']['shape3d']['cuboid3d']['vertices']
-            ) # [16, 3]
+        cuboid_vertices = np.asarray(
+            traffic_light_data['labelData']['shape3d']['cuboid3d']['vertices']
         )
-        polygon_colors.append(signal_render_color)
+        points_in_camera = camera_model.transform_points(cuboid_vertices, world_to_camera)
+        for face_indices in ALL_FACE_INDICES:
+            triangles_projected, _ = project_and_clip_triangle(
+                camera_model,
+                points_in_camera[np.asarray(face_indices)],
+            )
+            if len(triangles_projected):
+                clipped_triangles.extend(triangles_projected)
+                clipped_colors.extend([signal_render_color] * len(triangles_projected))
 
-    # projecting all points together to save time
-    all_polygon_vertices = np.concatenate(polygon_vertices, axis=0) # [N * 16, 3]
-    all_xy_and_depth = camera_model.get_xy_and_depth(all_polygon_vertices, camera_pose) # [N * 16, 3]
-    all_xy_and_depth = all_xy_and_depth.reshape(-1, 16, 3) # [N, 16, 3]
-
-    geometry_objects = []
-    for tl_index, xy_and_depth in enumerate(all_xy_and_depth):
-        if np.all(xy_and_depth[:, 2] < 0):
-            continue
-        geometry_objects.append(
-            Polygon2D(xy_and_depth, base_color=polygon_colors[tl_index])
+    if not clipped_triangles:
+        return []
+    return [
+        TriangleList2D(
+            np.asarray(clipped_triangles),
+            base_color=np.asarray(clipped_colors),
         )
-
-    return geometry_objects
+    ]

@@ -1,4 +1,4 @@
-apex==0.9.10dev
+# apex==0.9.10dev
 attr==0.3.2
 attrs==25.3.0
 better_profanity==0.7.0
@@ -44,3 +44,4 @@ python-pycg
 ray[default]
 shapely
 moderngl
+nuplan-devkit

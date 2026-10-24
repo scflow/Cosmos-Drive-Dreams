@@ -13,6 +13,7 @@ from pathlib import Path
 from utils.wds_utils import get_sample
 from utils.graphics_utils import LineSegment2D, render_geometries
 from utils.pcd_utils import interpolate_polyline_to_points, filter_by_height_relative_to_ego
+from utils.projection_clipping import project_and_clip_segments
 
 # Load lane line configuration
 LANELINE_CONFIG = json.load(open(Path(__file__).parent.parent / 'config' /'world_scenario_laneline_config.json', encoding='utf-8'))
@@ -370,6 +371,7 @@ def create_laneline_geometry_objects_from_data(
         geometry_objects: list[LineSegment2D], geometry objects for the current frame
     """
     geometry_objects = []
+    world_to_camera = np.linalg.inv(camera_pose)
     for laneline_info in processed_lanelines:
         # Combine all segments into a single polyline
         combined_segments = np.concatenate(laneline_info['pattern_segments_list'], axis=0)
@@ -382,16 +384,15 @@ def create_laneline_geometry_objects_from_data(
         for segments in laneline_info['pattern_segments_list']:
             if len(segments) == 0:
                 continue
-            # Project to image space and filter out the line segments that are out of the image
-            xy_and_depth = camera_model.get_xy_and_depth(segments.reshape(-1, 3), camera_pose).reshape(-1, 2, 3)
-            valid_line_segment_vertices = xy_and_depth[:, :, 2] >= 0
-            valid_line_segment_indices = np.all(valid_line_segment_vertices, axis=1)
-            valid_xy_and_depth = xy_and_depth[valid_line_segment_indices]
-            if len(valid_xy_and_depth) == 0:
+            points_in_camera = camera_model.transform_points(
+                segments.reshape(-1, 3), world_to_camera
+            ).reshape(-1, 2, 3)
+            clipped_segments = project_and_clip_segments(camera_model, points_in_camera)
+            if len(clipped_segments) == 0:
                 continue
             geometry_objects.append(
                 LineSegment2D(
-                    valid_xy_and_depth,
+                    clipped_segments,
                     base_color=laneline_info['rgb_float'],
                     line_width=laneline_info['line_width']
                 )

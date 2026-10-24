@@ -34,6 +34,7 @@ from utils.laneline_utils import prepare_laneline_type_geometry_data, create_lan
 from utils.pcd_utils import batch_move_points_within_bboxes_sparse, forward_warp_multiframes_sparse_depth_only
 from utils.camera.pinhole import PinholeCamera
 from utils.camera.ftheta import FThetaCamera
+from utils.camera.opencv_distorted import OpenCVDistortedCamera
 from utils.ray_utils import ray_remote, wait_for_futures
 from utils.graphics_utils import render_geometries
 
@@ -121,6 +122,16 @@ def prepare_input(input_root, clip_id, settings, camera_type, post_training, res
             intrinsic_data = get_sample(intrinsic_file)
             intrinsic_this_cam = intrinsic_data[f"{camera_type}_intrinsic.{camera_name}.npy"]
             camera_model = PinholeCamera.from_numpy(intrinsic_this_cam, device='cpu')
+
+            rescale_h = resize_h / camera_model.height
+            rescale_w = resize_w / camera_model.width
+            camera_model.rescale(rescale_h, rescale_w)
+
+        elif camera_type == "opencv":
+            intrinsic_file = os.path.join(input_root, 'opencv_intrinsic', f"{clip_id}.tar")
+            intrinsic_data = get_sample(intrinsic_file)
+            intrinsic_this_cam = intrinsic_data[f"opencv_intrinsic.{camera_name}.npy"]
+            camera_model = OpenCVDistortedCamera.from_numpy(intrinsic_this_cam, device='cpu')
 
             rescale_h = resize_h / camera_model.height
             rescale_w = resize_w / camera_model.width
@@ -227,7 +238,7 @@ def prepare_output(
             ffmpeg_params=[
                 "-crf", "18",     # Lower CRF for higher quality (0-51, lower is better)
                 "-preset", "slow",   # Slower preset for better compression/quality
-                "-pix_fmt", "yuv420p", # Ensures wide compatibility
+                "-threads", os.environ.get("RDS_FFMPEG_THREADS", "2"),
             ],
         )
         for local_frame_idx in range(len(full_video_cut)):
@@ -311,7 +322,9 @@ def render_sample_world_scenario(
     world scenario is an improved version of hdmap condition. It is introduced in Cosmos-Transfer 2.5
     """
 
-    minimap_types = settings['MINIMAP_TYPES']
+    # Allow datasets to omit layers such as crosswalks here while keeping them
+    # in the regular HD-map render, where their full geometry is still useful.
+    minimap_types = settings.get('WORLD_SCENARIO_MINIMAP_TYPES', settings['MINIMAP_TYPES'])
     # Remove laneline and traffic light from minimap types since they are rendered separately
     minimap_types = [minimap_type for minimap_type in minimap_types if minimap_type not in ['lanelines', 'traffic_lights']]
 
@@ -583,7 +596,7 @@ def render_sample_rgb(
 @click.option("--clip_id_json", "-cj", type=str, default=None, help="exact clip id or path to the clip id json file. If provided, we just render the clips in the json file.")
 @click.option("--output_root", '-o', type=str, required=True, help="the root folder for the output data")
 @click.option("--dataset", "-d", type=str, default="rds_hq", help="the dataset name, 'rds_hq', 'rds_hd_mv', 'waymo' or 'waymo_mv', see xxx.json in config folder")
-@click.option("--camera_type", "-c", type=str, default="ftheta", help="the type of camera model, 'pinhole' or 'ftheta'")
+@click.option("--camera_type", "-c", type=str, default="ftheta", help="the camera model: 'pinhole', 'opencv', or 'ftheta'")
 @click.option("--skip", "-s", multiple=True, help="can be 'hdmap' or 'lidar' or 'world_scenario'")
 @click.option("--post_training", "-p", type=bool, default=False, help="if True, output the RGB video for post-training")
 @click.option("--novel_pose_folder", "-np", type=str, default=None, help="the folder name of the novel pose data. If provided, we will render the novel ego trajectory")

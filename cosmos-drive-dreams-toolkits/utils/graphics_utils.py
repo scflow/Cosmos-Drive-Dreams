@@ -130,6 +130,38 @@ class LineSegment2D(Geometry2D):
         vao.render()
 
 
+class LineSegment2DPerVertex(Geometry2D):
+    """Render line segments with an independent color at each endpoint."""
+
+    def __init__(self, xy_and_depth: np.ndarray, per_vertex_color: np.ndarray, line_width: float):
+        self.xy_and_depth = np.asarray(xy_and_depth)
+        self.per_vertex_color = np.asarray(per_vertex_color)
+        self.line_width = line_width
+
+        if self.xy_and_depth.ndim != 3 or self.xy_and_depth.shape[1:] != (2, 3):
+            raise ValueError(f"xy_and_depth must be (N,2,3), got {self.xy_and_depth.shape}")
+        if self.per_vertex_color.shape != (self.xy_and_depth.shape[0], 2, 3):
+            raise ValueError(
+                f"per_vertex_color must be (N,2,3), got {self.per_vertex_color.shape}"
+            )
+        if (self.per_vertex_color > 1.0).any():
+            raise ValueError("color must be in the range [0, 1]")
+
+    def render(self, ctx, program, **kwargs):
+        program['u_line_width'].value = 2 * self.line_width / kwargs['image_width']
+        vertex_position = self.xy_and_depth.reshape(-1, 3).astype('f4')
+        vertex_color = self.per_vertex_color.reshape(-1, 3).astype('f4')
+
+        vbo = ctx.buffer(vertex_position.tobytes())
+        vbo_color = ctx.buffer(vertex_color.tobytes())
+        vao = ctx.vertex_array(
+            program,
+            [(vbo, '3f', 'in_pos'), (vbo_color, '3f', 'in_color')],
+            mode=moderngl.LINES,
+        )
+        vao.render()
+
+
 class PolyLine2D(Geometry2D):
     """
     After projecting 3D vertices to 2D, the vertices are stored in this class.
@@ -236,8 +268,10 @@ class TriangleList2D(Geometry2D):
         # Prepare colors for each vertex
         if self.base_color.ndim == 1:  # Single color for all triangles
             vertex_colors = np.tile(self.base_color, (len(vertices), 1)).astype('f4')
-        else:  # Per-triangle colors: [M, 3] -> [M*3, 3]
+        elif self.base_color.ndim == 2:  # Per-triangle colors: [M, 3] -> [M*3, 3]
             vertex_colors = np.repeat(self.base_color, 3, axis=0).astype('f4')
+        else:  # Per-vertex colors: [M, 3, 3] -> [M*3, 3]
+            vertex_colors = self.base_color.reshape(-1, 3).astype('f4')
         
         vbo = ctx.buffer(vertices.tobytes())
         vbo_base_color = ctx.buffer(vertex_colors.tobytes())
@@ -245,6 +279,36 @@ class TriangleList2D(Geometry2D):
         vao = ctx.vertex_array(program, 
                             [(vbo, '3f', 'in_pos'), (vbo_base_color, '3f', 'in_color')],
                             mode=moderngl.TRIANGLES)
+        vao.render()
+
+
+class TriangleList2DPerVertex(Geometry2D):
+    """Render triangles carrying an independent RGB color at every vertex."""
+
+    def __init__(self, triangles: np.ndarray, colors: np.ndarray):
+        self.triangles = np.asarray(triangles)
+        self.colors = np.asarray(colors)
+
+        if self.triangles.ndim != 3 or self.triangles.shape[1:] != (3, 3):
+            raise ValueError(f"triangles must be (M,3,3), got {self.triangles.shape}")
+        if self.colors.shape != self.triangles.shape:
+            raise ValueError(
+                f"colors must match triangles shape, got {self.colors.shape} vs {self.triangles.shape}"
+            )
+        if (self.colors > 1.0).any():
+            raise ValueError("color must be in the range [0, 1]")
+
+    def render(self, ctx, program, **kwargs):
+        vertices = self.triangles.reshape(-1, 3).astype('f4')
+        vertex_colors = self.colors.reshape(-1, 3).astype('f4')
+
+        vbo = ctx.buffer(vertices.tobytes())
+        vbo_color = ctx.buffer(vertex_colors.tobytes())
+        vao = ctx.vertex_array(
+            program,
+            [(vbo, '3f', 'in_pos'), (vbo_color, '3f', 'in_color')],
+            mode=moderngl.TRIANGLES,
+        )
         vao.render()
 
 
